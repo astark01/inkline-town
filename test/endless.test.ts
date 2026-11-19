@@ -11,8 +11,24 @@ import { amounts, FACE_TICKS, goodIds, kinds, ranks, stepsOf, YEARS_PER_TERM } f
 import { canPlace, GridBuilder } from "../src/game/world/grid.ts"
 import { goalsOf, nextRank, scoreOf } from "../src/game/rules/goals.ts"
 import { headless, type Snapshot } from "../src/game/headless.ts"
+import { Game } from "../src/game/schema.ts"
+import { frameAccess, frameOf } from "../src/view/frame.ts"
+import { buildingPanel } from "../src/view/panels/building.ts"
+import { noneWanted, upgradesOf, upgradesWanted } from "../src/view/upgrades.ts"
 
 const charter = { size: "small", term: 45, land: "fair", seed: 11 } as const
+
+const hallUpgradeView = Game.Inspector("Test/HallUpgradeView", frameAccess, ({ queries, resources }) => {
+  const frame = frameOf(queries, resources)
+  const hall = frame.buildings.find((row) => row.data.hall !== undefined)
+  if (!hall) throw new Error("The town has no town hall")
+  const needed = upgradesWanted(frame, noneWanted())
+  return {
+    panel: buildingPanel(frame, hall, needed.get(hall.entity.id) ?? null),
+    upgrades: upgradesOf(frame, needed).upgrades,
+    needed: needed.has(hall.entity.id)
+  }
+})
 
 /** A standing market on free ground beside the town hall's ring road, as a snapshot is changed. */
 const market = (s: Snapshot) => {
@@ -121,6 +137,13 @@ test("a market is upgraded to a market hall once the town is a town, and not bef
   assert.equal(hall.components["Town/Service"].interval, stepsOf(up.service!.seconds))
   assert(stockOf(s, "stone") <= stone - up.cost.materials.stone!)
   assert(s.resources["Town/Chronicle"].lines.some((l: { text: string }) => l.text === "The market is now a market hall."))
+  toasts.length = 0
+  t.edit({ type: "upgrade", cell })
+  t.run(1 / 60)
+  const finished = t.snapshot().entities.find((e) => e.components["Town/Building"]?.kind === "market")!
+  assert.deepEqual(finished.components["Town/Upgraded"], { level: 1 })
+  assert.equal("Town/Works" in finished.components, false)
+  assert(toasts.includes("The market hall cannot be upgraded further"), toasts.join(" | "))
 })
 
 test("the town hall becomes a guildhall from its own stores, and the guildhall a city hall", () => {
@@ -141,11 +164,27 @@ test("the town hall becomes a guildhall from its own stores, and the guildhall a
   assert.deepEqual(guild.components["Town/Upgraded"], { level: 1 }, JSON.stringify(guild.components["Town/Works"]))
   assert.equal(guild.components["Town/Inventory"].cap, kinds.townhall.upgrade!.cap)
   assert.equal(guild.components["Town/Carriers"].count, kinds.townhall.upgrade!.carriers)
+  const guildView = t.runtime.inspect(hallUpgradeView)
+  assert(guildView.panel.type === "building")
+  assert.equal(guildView.panel.upgrade?.title, "City hall")
+  assert(guildView.upgrades.some((up) => up.kind === "townhall" && up.level === 1 && up.ready === 1))
   t.edit({ type: "upgrade", cell })
   t.run(300)
   const city = hallOf(t.snapshot())
   assert.deepEqual(city.components["Town/Upgraded"], { level: 2 }, JSON.stringify(city.components["Town/Works"]))
   assert.equal(city.components["Town/Inventory"].cap, kinds.townhall.upgrade!.next!.cap)
+  // Full shelves would otherwise call for an upgrade.
+  t.change((s) => {
+    const inventory = hallOf(s).components["Town/Inventory"]
+    inventory.stock.planks = inventory.cap
+  })
+  t.run(1 / 60)
+  const cityView = t.runtime.inspect(hallUpgradeView)
+  assert(cityView.panel.type === "building")
+  assert.equal(cityView.panel.title, "City hall")
+  assert.equal(cityView.panel.upgrade, null)
+  assert.equal(cityView.upgrades.some((up) => up.kind === "townhall"), false)
+  assert.equal(cityView.needed, false)
 })
 
 test("once a term runs out, the next one carries on the same town", () => {

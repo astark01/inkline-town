@@ -11,10 +11,11 @@ import { test } from "node:test"
 import { Effect } from "effect"
 
 import { describe, load, loadLatest, loadText, memoryStorage, read, save, SAVE_FORMAT, SAVE_VERSION, Storage, World, type LoadError } from "../src/platform/save.ts"
+import { kinds, stepsOf } from "../src/game/content/index.ts"
 import { headless, type Headless } from "../src/game/headless.ts"
 
 const worldOf = (town: Headless): World["Service"] => ({
-  snapshot: () => ({ ok: true, value: town.snapshot() }),
+  snapshot: () => town.runtime.snapshot(),
   restore: (data) => {
     try {
       town.restore(data)
@@ -58,6 +59,47 @@ test("a saved town loads back as it was", () => {
   assert.notEqual(playing(town), before)
   assert.equal(run(load("manual"))._tag, "Success")
   assert.equal(playing(town), before)
+})
+
+test("a city hall cannot be upgraded again, and the town can still be saved and loaded", () => {
+  const { town, run } = setup()
+  const toasts: Array<string> = []
+  town.toast = (message) => toasts.push(message)
+  town.change((snapshot) => {
+    snapshot.resources["Town/Fate"].rank = 2
+    snapshot.resources["Town/Treasury"].coins = 5000
+    const hall = snapshot.entities.find((e) => e.components["Town/TownHall"])!
+    const city = kinds.townhall.upgrade!.next!
+    hall.components["Town/Upgraded"] = { level: 2 }
+    hall.components["Town/Inventory"].cap = city.cap
+    hall.components["Town/Inventory"].stock = { ...hall.components["Town/Inventory"].stock, planks: 100, stone: 100, tools: 30, cloth: 30 }
+    hall.components["Town/Carriers"].count = city.carriers
+    hall.components["Town/Service"].range = city.service!.range
+    hall.components["Town/Service"].interval = stepsOf(city.service!.seconds)
+  })
+  const before = town.snapshot()
+  const hall = before.entities.find((e) => e.components["Town/TownHall"])!
+  const cell = hall.components["Town/Tile"]
+  town.edit({ type: "upgrade", cell })
+  town.run(1 / 60)
+
+  const saved = run(save("manual"))
+  assert.equal(saved._tag, "Success", JSON.stringify(saved))
+  const after = town.snapshot()
+  const city = after.entities.find((e) => e.id === hall.id)!
+  assert.deepEqual(city.components["Town/Upgraded"], { level: 2 })
+  assert.equal("Town/Works" in city.components, false)
+  assert.equal(after.resources["Town/Treasury"].coins, before.resources["Town/Treasury"].coins)
+  assert.deepEqual(city.components["Town/Inventory"].stock, hall.components["Town/Inventory"].stock)
+  assert(toasts.some((message) => message.includes("cannot be upgraded further")), toasts.join(" | "))
+
+  const savedTown = playing(town)
+  town.run(1)
+  assert.equal(run(load("manual"))._tag, "Success")
+  assert.equal(playing(town), savedTown)
+  town.edit({ type: "upgrade", cell })
+  town.run(1 / 60)
+  assert.equal(run(save("auto"))._tag, "Success")
 })
 
 test("nothing saved", () => {
